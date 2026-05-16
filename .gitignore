@@ -70,3 +70,9 @@ Testing/
 
 # dependencies
 dependencies/
+
+# models
+model_files/
+
+# logs
+logs/
