@@ -23,6 +23,47 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(spdlog)
 
+# Boost
+include(FetchContent)
+
+FetchContent_Declare(
+    boost_assert
+    GIT_REPOSITORY https://github.com/boostorg/assert.git
+    GIT_TAG boost-1.91.0
+)
+
+FetchContent_Declare(
+    boost_config
+    GIT_REPOSITORY https://github.com/boostorg/config.git
+    GIT_TAG boost-1.91.0
+)
+
+FetchContent_Declare(
+    boost_throw_exception
+    GIT_REPOSITORY https://github.com/boostorg/throw_exception.git
+    GIT_TAG boost-1.91.0
+)
+
+FetchContent_Declare(
+    boost_type_traits
+    GIT_REPOSITORY https://github.com/boostorg/type_traits.git
+    GIT_TAG boost-1.91.0
+)
+
+FetchContent_Declare(
+    uuid
+    GIT_REPOSITORY https://github.com/boostorg/uuid.git
+    GIT_TAG boost-1.91.0
+)
+
+FetchContent_MakeAvailable(
+    boost_assert
+    boost_config
+    boost_throw_exception
+    boost_type_traits
+    uuid
+)
+
 
 ### Execs
 file(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS "src/*.cpp")
@@ -35,6 +76,7 @@ add_executable(xprv ${SOURCE_FILES} ${HEADER_FILES})
 target_link_libraries(xprv PRIVATE
     llama
     spdlog::spdlog
+    Boost::uuid
 )
 
 target_include_directories(xprv PRIVATE
@@ -48,7 +90,14 @@ target_include_directories(xprv PRIVATE
 ### Defs
 
 #
-add_definitions(-DQWEN_FILE="${CMAKE_CURRENT_SOURCE_DIR}/model_files/Qwen3-8B-Q5_K_M.gguf")
+add_definitions(
+    -DQWEN_FILE="${CMAKE_CURRENT_SOURCE_DIR}/model_files/Qwen3-8B-Q5_K_M.gguf"
+    -DGEMMA_FILE="${CMAKE_CURRENT_SOURCE_DIR}/model_files/gemma-4-E4B-it-Q5_K_M.gguf"
+    -DMINISTRAL_FILE="${CMAKE_CURRENT_SOURCE_DIR}/model_files/Ministral-3-3B-Instruct-2512-Q5_K_M.gguf"
+)
 
 #
-add_definitions(-DLOG_LEVEL=1 -DLOG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/logs") # todo
+add_definitions(
+    -DLOG_LEVEL=1
+    -DLOG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/logs"
+) # todo

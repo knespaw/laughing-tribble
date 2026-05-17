@@ -1,40 +1,95 @@
 #include <iostream>
-
-#include "llama.h"
-
 #include <iterator>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
-#include "config.h"
-
+#include "llama.h"
 #include "spdlog/fmt/fmt.h"
+#include <boost/uuid.hpp>
 
 #include "utils/logger.h"
 
 
 
-constexpr std::string_view PROMPT_INSERT = "<PROMPT>";
+constexpr std::string_view USR_PROMPT = "<USR_PROMPT>";
 
 
 
-enum TokenSampler
+class GenerationError : public std::runtime_error
+{
+	private:
+
+		int error_code_;
+
+	public:
+
+		GenerationError(const int code, const std::string &msg) :
+			std::runtime_error(msg),
+			error_code_(code)
+		{
+		}
+
+		[[nodiscard]] int getErrorCode() const { return error_code_; }
+};
+
+
+
+struct SequenceMeta
+{
+		llama_seq_id sequenceId;
+		llama_pos	 position;
+
+		[[nodiscard]] bool		  initialized() const;
+		void					  restart();
+		[[nodiscard]] std::string info() const;
+};
+
+
+bool SequenceMeta::initialized() const { return position > 0; }
+
+void SequenceMeta::restart() { position = 0; }
+
+std::string SequenceMeta::info() const
+{
+	fmt::memory_buffer buffer;
+
+	fmt::format_to(
+		std::back_inserter(buffer),
+		"sequenceID : {}, tokenPosition : {}",
+		sequenceId,
+		position
+	);
+
+	return fmt::to_string(buffer);
+}
+
+
+
+struct Input
+{
+		// boost::uuids::uuid id;
+		const std::string id;
+		std::string		  prompt;
+		SequenceMeta	  meta;
+};
+
+
+
+struct Output
+{
+		// boost::uuids::uuid id;
+		const std::string id;
+		std::string		  response;
+};
+
+
+
+enum DecodingStrategy
 {
 	GREEDY = 0,
 };
 
-constexpr std::string_view to_string(const TokenSampler sampler) noexcept
-{
-	switch (sampler)
-	{
-	case GREEDY:
-		return "GREEDY";
-	}
-
-	throw std::invalid_argument("unrecognized token sampler");
-}
 
 
 struct InferenceParameters
@@ -42,11 +97,10 @@ struct InferenceParameters
 		const char		 *modelFile;
 		uint32_t		  maxParallelSequences;
 		uint32_t		  maxTotalBatchSize;
-		int32_t			  batchSize;
 		uint32_t		  totalContextSize;
 		int32_t			  nCPUThreads;
 		int32_t			  nGPUStoredLayers;
-		TokenSampler	  tokenSampler;
+		DecodingStrategy  decodingStrategy;
 		const std::string promptTemplate;
 
 		[[nodiscard]] std::string print() const;
@@ -59,167 +113,90 @@ std::string InferenceParameters::print() const
 	fmt::format_to(
 		std::back_inserter(buffer),
 		"InferenceParameters{{modelFile=\"{}\", maxParallelSequences={}, "
-		"maxTotalBatchSize={}, totalContextSize={}, nCPUThreads={}, "
-		"nGPUStoredLayers={}, tokenSampler={}}}",
+		"maxTotalBatchSize={}, totalContextSize={}, "
+		"nCPUThreads={}, "
+		"nGPUStoredLayers={}, decodingStrategy={}, promptTemplate={}}}",
 		modelFile != nullptr ? modelFile : "(null)",
 		maxParallelSequences,
 		maxTotalBatchSize,
 		totalContextSize,
 		nCPUThreads,
 		nGPUStoredLayers,
-		to_string(tokenSampler)
+		static_cast<int>(decodingStrategy),
+		promptTemplate
 	);
 
 	return fmt::to_string(buffer);
 }
 
 
-class Tokenizer
+
+class Inference
 {
 	public:
 
-		Tokenizer(std::string promptBlueprint, const llama_model *model);
+		explicit Inference(const InferenceParameters &params);
+		~Inference();
 
-		void							 tokenize(const std::string &text);
-		[[nodiscard]] llama_token		 getToken(int position) const;
-		[[nodiscard]] size_t			 nTokens() const noexcept;
-		[[nodiscard]] const llama_vocab *getVocab() const noexcept;
+		static llama_model		 *loadModel(const InferenceParameters &params);
+		static const llama_vocab *loadVocabulary(llama_model *model);
+		static llama_context *
+		startContext(const InferenceParameters &params, llama_model *model);
+		static llama_sampler *initSampler(
+			const InferenceParameters &params,
+			llama_context			  *ctx,
+			llama_model				  *model
+		);
+
+		Output run(Input &inp);
+		void   clearMemory() const;
 
 	private:
 
-		const std::string		 promptTemplate;
-		const size_t			 _promptInsertIdx;
-		const llama_vocab		*vocabulary = nullptr;
-		std::vector<llama_token> tokens;
+		llama_model		  *model_	= nullptr;
+		const llama_vocab *vocab_	= nullptr;
+		llama_context	  *ctx_		= nullptr;
+		llama_sampler	  *sampler_ = nullptr;
 
-		[[nodiscard]] std::string preparePrompt(const std::string &input) const;
+		InferenceParameters		 parameters_;
+		std::vector<llama_token> tokens_;
+		const size_t			 promptInsertIdx_;
+
+		[[nodiscard]] std::string preparePrompt(const Input &inp) const;
+		void					  tokenize(const std::string &text);
+		void					  generate(const llama_batch &batch) const;
+		void					  prefill(llama_batch &batch, Input &inp) const;
+		[[nodiscard]] llama_token
+		sample(std::string *output, bool consolePrint) const;
+		[[nodiscard]] Output decode(llama_batch &batch, Input &inp) const;
 };
 
-Tokenizer::Tokenizer(std::string promptBlueprint, const llama_model *model) :
-	promptTemplate(std::move(promptBlueprint)),
-	_promptInsertIdx(promptTemplate.find(PROMPT_INSERT))
+
+llama_model *Inference::loadModel(const InferenceParameters &params)
 {
-	if (_promptInsertIdx == std::string::npos)
-	{
-		LOG_ERROR(
-			"`Tokenizer` initialization failed. invalid prompt template "
-			"\"{}\". should contain \"{}\" inside",
-			promptTemplate,
-			PROMPT_INSERT
-		);
-		throw std::invalid_argument("invalid prompt template");
-	}
-
-	if (const llama_vocab *vocab = llama_model_get_vocab(model);
-		vocab == nullptr)
-	{
-		LOG_ERROR(
-			"`Tokenizer` initialization failed. cannot load model vocabulary"
-		);
-		throw std::runtime_error("failed to load vocabulary");
-	}
-	else
-	{
-		// initial capacity
-		tokens	   = std::vector(3 * promptTemplate.size(), 0);
-		vocabulary = vocab;
-	}
-}
-
-std::string Tokenizer::preparePrompt(const std::string &input) const
-{
-	std::string prompt;
-
-	prompt.reserve(promptTemplate.size() - PROMPT_INSERT.size() + input.size());
-	prompt.append(promptTemplate, 0, _promptInsertIdx);
-	prompt.append(input);
-	prompt.append(
-		promptTemplate,
-		_promptInsertIdx + PROMPT_INSERT.size(),
-		std::string::npos
-	);
-
-	return prompt;
-}
-
-void Tokenizer::tokenize(const std::string &text)
-{
-	LOG_DEBUG("starting tokenization of \"{}\"", text);
-
-	const auto prompt = preparePrompt(text);
-
-	LOG_DEBUG("prepared model prompt \"{}\"", prompt);
-
-	// +2 for some safety margin
-	tokens.resize(prompt.size() + 2, 0);
-
-	const auto n_tokens = llama_tokenize(
-		vocabulary,
-		prompt.c_str(),
-		prompt.size(),
-		tokens.data(),
-		tokens.size(),
-		true,
-		true
-	);
-
-	if (n_tokens < 0)
-	{
-		LOG_ERROR("tokenization failed for prompt \"{}\"", prompt);
-		throw std::runtime_error("failed to tokenize prompt");
-	}
-
-	LOG_DEBUG("tokenization finished. {} tokens were prepared", n_tokens);
-
-	tokens.resize(n_tokens);
-}
-
-llama_token Tokenizer::getToken(const int position) const
-{
-	return tokens[position];
-}
-
-size_t Tokenizer::nTokens() const noexcept { return tokens.size(); }
-
-const llama_vocab *Tokenizer::getVocab() const noexcept { return vocabulary; }
-
-
-class Generator
-{
-	public:
-
-		explicit Generator(const InferenceParameters &params);
-		~Generator();
-
-		[[nodiscard]] const llama_model *getModel() const noexcept;
-		[[nodiscard]] llama_context		*getContext() const noexcept;
-		[[nodiscard]] llama_sampler		*getSampler() const noexcept;
-
-	private:
-
-		llama_context *ctx	   = nullptr;
-		llama_model	  *model   = nullptr;
-		llama_sampler *sampler = nullptr;
-};
-
-Generator::Generator(const InferenceParameters &params)
-{
-	LOG_INFO("creating new `Generator` instance with\n{}", params.print());
-
 	LOG_DEBUG("loading model from \"{}\"", params.modelFile);
 
 	llama_model_params model_params = llama_model_default_params();
 
 	model_params.n_gpu_layers = params.nGPUStoredLayers;
 
-	llama_model *m = llama_model_load_from_file(params.modelFile, model_params);
+	llama_model *model =
+		llama_model_load_from_file(params.modelFile, model_params);
 
-	if (m == nullptr)
+	if (model == nullptr)
 	{
-		LOG_ERROR("`Generator` initialization failed. cannot load model");
+		LOG_ERROR("cannot load model from \"{}\"", params.modelFile);
 		throw std::runtime_error("failed to load model from file");
 	}
 
+	LOG_DEBUG("model loaded from \"{}\"", params.modelFile);
+
+	return model;
+}
+
+llama_context *
+Inference::startContext(const InferenceParameters &params, llama_model *model)
+{
 	LOG_DEBUG("starting new inference context");
 
 	llama_context_params ctx_params = llama_context_default_params();
@@ -229,196 +206,338 @@ Generator::Generator(const InferenceParameters &params)
 	ctx_params.n_batch	 = params.maxTotalBatchSize;
 	ctx_params.n_seq_max = params.maxParallelSequences;
 
-	llama_context *c = llama_init_from_model(m, ctx_params);
+	llama_context *ctx = llama_init_from_model(model, ctx_params);
 
-	if (c == nullptr)
+	if (ctx == nullptr)
 	{
-		LOG_ERROR(
-			"`Generator` initialization failed. cannot initialize context"
-		);
-		llama_model_free(m);
+		LOG_ERROR("cannot start new context");
+		llama_model_free(model);
 		throw std::runtime_error("failed to initialize context");
 	}
 
-	LOG_DEBUG("starting new token sampler");
+	LOG_DEBUG("inference context started");
 
-	llama_sampler *s = nullptr;
-	switch (params.tokenSampler)
+	return ctx;
+}
+
+llama_sampler *Inference::initSampler(
+	const InferenceParameters &params,
+	llama_context			  *ctx,
+	llama_model				  *model
+)
+{
+	LOG_DEBUG(
+		"initializing sampler for \"{}\" decoding strategy",
+		static_cast<int>(params.decodingStrategy)
+	);
+
+	llama_sampler *sampler = nullptr;
+
+	switch (params.decodingStrategy)
 	{
 	case GREEDY:
-		s = llama_sampler_init_greedy();
+		sampler = llama_sampler_init_greedy();
 		break;
 	}
 
-	if (s == nullptr)
+	if (sampler == nullptr)
 	{
-		LOG_ERROR(
-			"`Generator` initialization failed. cannot initialize sampler"
+		LOG_DEBUG(
+			"failed to initialize sampler for \"{}\" decoding strategy",
+			static_cast<int>(params.decodingStrategy)
 		);
-		llama_free(c);
-		llama_model_free(m);
+		llama_free(ctx);
+		llama_model_free(model);
 		throw std::runtime_error("failed to initialize sampler");
 	}
 
-	model	= m;
-	ctx		= c;
-	sampler = s;
+	LOG_DEBUG(
+		"sampler initialized for \"{}\" decoding strategy",
+		static_cast<int>(params.decodingStrategy)
+	);
 
-	LOG_INFO("`Generator` initialized successfully");
+	return sampler;
 }
 
-Generator::~Generator()
+const llama_vocab *Inference::loadVocabulary(llama_model *model)
 {
-	llama_sampler_free(sampler);
-	llama_free(ctx);
-	llama_model_free(model);
+	LOG_DEBUG("loading model vocabulary");
+
+	if (const llama_vocab *vocab = llama_model_get_vocab(model);
+		vocab == nullptr)
+	{
+		LOG_ERROR("cannot load model vocabulary");
+		llama_model_free(model);
+		throw std::runtime_error("failed to load vocabulary");
+	}
+	else
+	{
+		LOG_DEBUG("loaded model vocabulary");
+		return vocab;
+	}
 }
 
-const llama_model *Generator::getModel() const noexcept { return model; }
-
-llama_context *Generator::getContext() const noexcept { return ctx; }
-
-llama_sampler *Generator::getSampler() const noexcept { return sampler; }
-
-
-class Inference
-{
-	public:
-
-		explicit Inference(const InferenceParameters &params);
-
-		[[nodiscard]] std::string infer(const std::string &input);
-
-	private:
-
-		Generator			generator;
-		Tokenizer			tokenizer;
-		InferenceParameters params;
-
-		llama_batch prepareBatch(const std::string &input);
-};
 
 Inference::Inference(const InferenceParameters &params) :
-	generator(params),
-	tokenizer(params.promptTemplate, generator.getModel()),
-	params(params)
+	model_(loadModel(params)),
+	vocab_(loadVocabulary(model_)),
+	ctx_(startContext(params, model_)),
+	sampler_(initSampler(params, ctx_, model_)),
+	parameters_(params),
+	tokens_(std::vector(3 * params.promptTemplate.size(), 0)),
+	promptInsertIdx_(params.promptTemplate.find(USR_PROMPT))
 {
-}
-
-llama_batch Inference::prepareBatch(const std::string &input)
-{
-	tokenizer.tokenize(input);
-
-	LOG_DEBUG("preparing new batch");
-
-	// TODO: params
-	llama_batch batch =
-		llama_batch_init(params.batchSize, 0, params.maxParallelSequences);
-
-	for (int i = 0; i < tokenizer.nTokens(); i++)
+	if (promptInsertIdx_ == std::string::npos)
 	{
-		batch.token[i]	   = tokenizer.getToken(i);
-		batch.pos[i]	   = i;
-		batch.n_seq_id[i]  = 1; // todo
-		batch.seq_id[i][0] = 0; // todo
-		// only output of the last token is taken into account
-		batch.logits[i] = false;
+		LOG_ERROR(
+			"`Inference` initialization failed. invalid prompt template "
+			"\"{}\". should contain \"{}\" inside",
+			params.promptTemplate,
+			USR_PROMPT
+		);
+		throw std::invalid_argument("invalid prompt template");
 	}
 
-	// to get probability of the last token
-	batch.logits[tokenizer.nTokens() - 1] = true;
-	batch.n_tokens						  = tokenizer.nTokens();
-
-	return batch;
+	LOG_INFO(
+		"successfully created new `Inference` instance with:\n{}",
+		params.print()
+	);
 }
 
-std::string Inference::infer(const std::string &input)
+Inference::~Inference()
 {
-	LOG_DEBUG("running new inference for \'{}\'", input);
+	LOG_INFO("destructing `Inference` instance");
 
-	llama_batch batch = prepareBatch(input);
+	llama_sampler_free(sampler_);
+	llama_free(ctx_);
+	llama_model_free(model_);
+}
 
-	// PREFILL
-	LOG_DEBUG("running prefill stage");
+
+std::string Inference::preparePrompt(const Input &inp) const
+{
+	std::string prompt;
+	prompt.reserve(
+		parameters_.promptTemplate.size() - USR_PROMPT.size() +
+		inp.prompt.size()
+	);
+
+	prompt.append(parameters_.promptTemplate, 0, promptInsertIdx_);
+	prompt.append(inp.prompt);
+	prompt.append(
+		parameters_.promptTemplate,
+		promptInsertIdx_ + USR_PROMPT.size(),
+		std::string::npos
+	);
+
+	return prompt;
+}
+
+void Inference::tokenize(const std::string &text)
+{
+	LOG_DEBUG("starting tokenization of \"{}\"", text);
+
+	// +2 for some safety margin
+	tokens_.resize(text.size() + 2, 0);
+
+	const auto nTokens = llama_tokenize(
+		vocab_,
+		text.c_str(),
+		text.size(),
+		tokens_.data(),
+		tokens_.size(),
+		true,
+		true
+	);
+
+	if (nTokens < 0)
+	{
+		LOG_ERROR("tokenization failed for \"{}\"", text);
+		throw std::runtime_error("failed to tokenize text");
+	}
+
+	LOG_DEBUG("tokenization finished. {} tokens were prepared", nTokens);
+
+	tokens_.resize(nTokens);
+}
+
+void Inference::generate(const llama_batch &batch) const
+{
+	auto const code = llama_decode(ctx_, batch);
+
+	if (code == 0)
+	{
+		return;
+	}
+
+	LOG_ERROR("generation failed with {} code", code);
 
 	// TODO
-	switch (llama_decode(generator.getContext(), batch))
+	switch (code)
 	{
-	case 0:
-		break;
+	case -1:
+		throw GenerationError(code, "invalid input batch");
+	case 1:
+		throw GenerationError(code, "not enough memory");
+	case 2:
+		throw GenerationError(code, "aborted");
 	default:
-		LOG_ERROR("inference failed. prefill stage errored");
-		llama_batch_free(batch);
-		return "";
+		throw GenerationError(code, "fatal");
+	}
+}
+
+void Inference::prefill(llama_batch &batch, Input &inp) const
+{
+	LOG_DEBUG(
+		"{} :: {} :: running prefill stage for {} tokens",
+		inp.id,
+		inp.meta.info(),
+		batch.n_tokens
+	);
+
+	for (int i = 0; i < tokens_.size(); i++)
+	{
+		// only output of the last token is taken into account
+		batch.logits[i]	   = false;
+		batch.token[i]	   = tokens_[i];
+		batch.pos[i]	   = inp.meta.position + i;
+		batch.n_seq_id[i]  = 1;					  // todo
+		batch.seq_id[i][0] = inp.meta.sequenceId; // todo
 	}
 
-	// DECODE
-	LOG_DEBUG("running decode stage");
+	// get probability of the last token
+	batch.logits[tokens_.size() - 1] = true;
+	batch.n_tokens					 = tokens_.size();
 
-	std::string response;
-	response.reserve(1000); // todo
-
-	int currPos = batch.n_tokens;
-
-	while (true)
+	try
 	{
-		const llama_token newTokenId = llama_sampler_sample(
-			generator.getSampler(),
-			generator.getContext(),
-			-1
-		);
+		generate(batch);
+	}
+	catch (const GenerationError &err)
+	{
+		// TODO
+	}
 
-		llama_sampler_accept(generator.getSampler(), newTokenId);
+	inp.meta.position += batch.n_tokens;
 
-		if (llama_vocab_is_eog(tokenizer.getVocab(), newTokenId))
+	LOG_DEBUG(
+		"{} :: {} :: prefill stage completed",
+		inp.id,
+		inp.meta.info(),
+		batch.n_tokens
+	);
+
+	llama_batch_free(batch);
+}
+
+llama_token
+Inference::sample(std::string *output, const bool consolePrint) const
+{
+	// TODO
+	// last (new) token
+	const llama_token newTokenId = llama_sampler_sample(sampler_, ctx_, -1);
+
+	llama_sampler_accept(sampler_, newTokenId);
+
+	if (llama_vocab_is_eog(vocab_, newTokenId))
+	{
+		return newTokenId;
+	}
+
+	// usually, tokens represent 3-4 characters, but some may be longer,
+	// thus 128 is a safe bet
+	char buffer[128];
+
+	const auto nBytes = llama_token_to_piece(
+		vocab_,
+		newTokenId,
+		buffer,
+		sizeof(buffer),
+		0,
+		false
+	);
+
+	if (nBytes > 0)
+	{
+		output->append(buffer, nBytes);
+
+		if (consolePrint)
 		{
-			break;
-		}
-
-		// usually, tokens represent 3-4 characters, but some may be longer,
-		// thus 128 is a safe bet
-		char buffer[128];
-
-		const auto nBytes = llama_token_to_piece(
-			tokenizer.getVocab(),
-			newTokenId,
-			buffer,
-			sizeof(buffer),
-			0,
-			false
-		);
-
-		if (nBytes > 0)
-		{
-			response.append(buffer, nBytes);
 			std::cout.write(buffer, nBytes);
 			std::cout.flush();
 		}
+	}
 
-		// ??
-		batch.n_tokens	   = 0;
-		batch.token[0]	   = newTokenId;
-		batch.pos[0]	   = currPos;
-			batch.n_seq_id[0]  = 1;
-		batch.seq_id[0][0] = 0;
-		batch.logits[0]	   = true;
-		batch.n_tokens	   = 1;
+	return newTokenId;
+}
 
+Output Inference::decode(llama_batch &batch, Input &inp) const
+{
+	LOG_DEBUG("{} :: {} :: running decode stage", inp.id, inp.meta.info());
+
+	auto output = Output{inp.id};
+	output.response.reserve(500);
+
+	for (auto tokenId = sample(&output.response, true);
+		 !llama_vocab_is_eog(vocab_, tokenId);
+		 tokenId = sample(&output.response, true))
+	{
 		// TODO
-		switch (llama_decode(generator.getContext(), batch))
+		batch.n_tokens	   = 1;
+		batch.token[0]	   = tokenId;
+		batch.pos[0]	   = inp.meta.position;
+		batch.n_seq_id[0]  = 1;
+		batch.seq_id[0][0] = inp.meta.sequenceId;
+		batch.logits[0]	   = true;
+
+		try
 		{
-		case 0:
-			break;
-		default:
-			LOG_ERROR("inference failed. failure during decode phase");
-			llama_batch_free(batch);
-			return response;
+			generate(batch);
+		}
+		catch (const GenerationError &err)
+		{
+			// TODO
 		}
 
-		currPos++;
+		inp.meta.position++;
 	}
+
+	LOG_DEBUG(
+		"{} :: {} :: generation finished: \"{}\"",
+		output.id,
+		inp.meta.info(),
+		output.response
+	);
 
 	llama_batch_free(batch);
 
-	return response;
+	return output;
+}
+
+Output Inference::run(Input &inp)
+{
+	if (!inp.meta.initialized())
+	{
+		const auto prompt = preparePrompt(inp);
+
+		tokenize(prompt);
+
+		// TODO
+		auto prefillBatch = llama_batch_init(
+			tokens_.size(),
+			0,
+			parameters_.maxParallelSequences
+		);
+
+		prefill(prefillBatch, inp);
+	}
+
+	auto decodeBatch = llama_batch_init(1, 0, 1);
+
+	return decode(decodeBatch, inp);
+}
+
+void Inference::clearMemory() const
+{
+	llama_memory_clear(llama_get_memory(ctx_), false);
 }

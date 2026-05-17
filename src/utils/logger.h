@@ -38,8 +38,8 @@ namespace Logger
 		);
 
 		logger->set_pattern(
-			"[%Y-%m-%d %H:%M:%S.%e] :: [P:%P] :: [T:%t] :: "
-			"[%s:%# -> %!] :: [%l] :: %v"
+			"[%Y-%m-%d %H:%M:%S.%e] :::: [P:%P] :::: [T:%t] :::: "
+			"[%s:%# -> %!] :::: [%l] :::: %v"
 		);
 
 		switch (LOG_LEVEL)
@@ -59,6 +59,9 @@ namespace Logger
 		default:
 			logger->set_level(spdlog::level::err);
 		}
+
+		// logs are flushed only for INFO level
+		logger->flush_on(spdlog::level::info);
 
 		spdlog::set_default_logger(logger);
 	}

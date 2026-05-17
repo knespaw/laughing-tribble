@@ -71,7 +71,7 @@ AlignTrailingComments:
   Kind:            Always
   OverEmptyLines:  0
 AllowAllArgumentsOnNextLine: false
-AllowAllParametersOfDeclarationOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: false
 AllowBreakBeforeNoexceptSpecifier: Never
 AllowShortBlocksOnASingleLine: Never
 AllowShortCaseExpressionOnASingleLine: true
@@ -89,7 +89,7 @@ AttributeMacros:
   - __capability
 BinPackArguments: false
 BinPackLongBracedList: false
-BinPackParameters: BinPack
+BinPackParameters: false
 BitFieldColonSpacing: Both
 BracedInitializerIndentWidth: -1
 BraceWrapping:

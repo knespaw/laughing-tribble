@@ -8,10 +8,42 @@
 
 
 
-enum TokenSampler
+struct SequenceMeta
+{
+		llama_seq_id sequenceId;
+		llama_pos	 position;
+
+		[[nodiscard]] bool		  initialized() const;
+		void					  restart();
+		[[nodiscard]] std::string info() const;
+};
+
+
+
+struct Input
+{
+		// boost::uuids::uuid id;
+		const std::string id;
+		std::string		  prompt;
+		SequenceMeta	  meta;
+};
+
+
+
+struct Output
+{
+		// boost::uuids::uuid id;
+		const std::string id;
+		std::string		  response;
+};
+
+
+
+enum DecodingStrategy
 {
 	GREEDY = 0,
 };
+
 
 
 struct InferenceParameters
@@ -23,52 +55,12 @@ struct InferenceParameters
 		uint32_t		  totalContextSize;
 		int32_t			  nCPUThreads;
 		int32_t			  nGPUStoredLayers;
-		TokenSampler	  tokenSampler;
+		DecodingStrategy  decodingStrategy;
 		const std::string promptTemplate;
 
 		[[nodiscard]] std::string print() const;
 };
 
-
-class Tokenizer
-{
-	public:
-
-		Tokenizer(std::string promptBlueprint, const llama_model *model);
-
-		void							 tokenize(const std::string &text);
-		[[nodiscard]] llama_token		 getToken(int position) const;
-		[[nodiscard]] size_t			 nTokens() const noexcept;
-		[[nodiscard]] const llama_vocab *getVocab() const noexcept;
-
-	private:
-
-		const std::string		 promptTemplate;
-		const size_t			 _promptInsertIdx;
-		const llama_vocab		*vocabulary = nullptr;
-		std::vector<llama_token> tokens;
-
-		[[nodiscard]] std::string preparePrompt(const std::string &input) const;
-};
-
-
-class Generator
-{
-	public:
-
-		explicit Generator(const InferenceParameters &params);
-		~Generator();
-
-		[[nodiscard]] const llama_model *getModel() const noexcept;
-		[[nodiscard]] llama_context		*getContext() const noexcept;
-		[[nodiscard]] llama_sampler		*getSampler() const noexcept;
-
-	private:
-
-		llama_context *ctx	   = nullptr;
-		llama_model	  *model   = nullptr;
-		llama_sampler *sampler = nullptr;
-};
 
 
 class Inference
@@ -76,14 +68,37 @@ class Inference
 	public:
 
 		explicit Inference(const InferenceParameters &params);
+		~Inference();
 
-		[[nodiscard]] std::string infer(const std::string &input);
+		static llama_model		 *loadModel(const InferenceParameters &params);
+		static const llama_vocab *loadVocabulary(llama_model *model);
+		static llama_context *
+		startContext(const InferenceParameters &params, llama_model *model);
+		static llama_sampler *initSampler(
+			const InferenceParameters &params,
+			llama_context			  *ctx,
+			llama_model				  *model
+		);
+
+		Output run(Input &inp);
+		void   clearMemory() const;
 
 	private:
 
-		Generator			generator;
-		Tokenizer			tokenizer;
-		InferenceParameters params;
+		llama_model		  *model_	= nullptr;
+		const llama_vocab *vocab_	= nullptr;
+		llama_context	  *ctx_		= nullptr;
+		llama_sampler	  *sampler_ = nullptr;
 
-		llama_batch prepareBatch(const std::string &input);
+		InferenceParameters		 parameters_;
+		std::vector<llama_token> tokens_;
+		const size_t			 promptInsertIdx_;
+
+		[[nodiscard]] std::string preparePrompt(const Input &inp) const;
+		void					  tokenize(const std::string &text);
+		void					  generate(const llama_batch &batch) const;
+		void					  prefill(llama_batch &batch, Input &inp) const;
+		[[nodiscard]] llama_token
+		sample(std::string *output, bool consolePrint) const;
+		[[nodiscard]] Output decode(llama_batch &batch, Input &inp) const;
 };
