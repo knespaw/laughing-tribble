@@ -2,3 +2,4 @@
 
 
 #include "inference.h"
+#include "text.h"

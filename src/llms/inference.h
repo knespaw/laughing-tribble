@@ -2,103 +2,86 @@
 
 
 #include <string>
-#include <vector>
 
 #include "llama.h"
 
+#include "text.h"
+#include "utils.h"
 
 
-struct SequenceMeta
+
+namespace Inference
 {
-		llama_seq_id sequenceId;
-		llama_pos	 position;
-
-		[[nodiscard]] bool		  initialized() const;
-		void					  restart();
-		[[nodiscard]] std::string info() const;
-};
+	enum class DecodingStrategy
+	{
+		Greedy = 0,
+	};
 
 
 
-struct Input
-{
-		// boost::uuids::uuid id;
-		const std::string id;
-		std::string		  prompt;
-		SequenceMeta	  meta;
-};
+	struct Parameters
+	{
+			const char		*modelFile;
+			uint32_t		 maxParallelSequences;
+			uint32_t		 maxTotalBatchSize;
+			size_t			 batchSize;
+			uint32_t		 totalContextSize;
+			int32_t			 nCPUThreads;
+			int32_t			 nGPUStoredLayers;
+			DecodingStrategy decodingStrategy;
+
+			[[nodiscard]] std::string print() const;
+	};
 
 
 
-struct Output
-{
-		// boost::uuids::uuid id;
-		const std::string id;
-		std::string		  response;
-};
+	class Call
+	{
+		public:
+
+			explicit Call(UuidGenerator &generator);
+			explicit Call(boost::uuids::uuid);
+
+			const boost::uuids::uuid id;
+			UserPrompt				 input;
+			std::string				 output;
+
+			[[nodiscard]] llama_pos	   getPosition() const;
+			[[nodiscard]] llama_seq_id getSequenceId() const;
+			[[nodiscard]] std::string  info() const;
+			[[nodiscard]] bool		   initialized() const;
+			[[nodiscard]] bool		   assigned() const;
+			void					   assign(uint32_t sequenceId);
+			void					   restart();
+			void					   incrementPosition();
+			void					   movePosition(llama_pos change);
+
+		private:
+
+			llama_seq_id sequenceId_ = -1;
+			llama_pos	 position_	 = 0;
+	};
 
 
 
-enum DecodingStrategy
-{
-	GREEDY = 0,
-};
+	class Engine
+	{
+		public:
 
+			Engine();
+			~Engine();
 
+			Engine(const Engine &)			  = delete;
+			Engine &operator=(const Engine &) = delete;
+			Engine(Engine &&)				  = delete;
+			Engine &operator=(Engine &&)	  = delete;
 
-struct InferenceParameters
-{
-		const char		 *modelFile;
-		uint32_t		  maxParallelSequences;
-		uint32_t		  maxTotalBatchSize;
-		int32_t			  batchSize;
-		uint32_t		  totalContextSize;
-		int32_t			  nCPUThreads;
-		int32_t			  nGPUStoredLayers;
-		DecodingStrategy  decodingStrategy;
-		const std::string promptTemplate;
+			boost::uuids::uuid newSession(const Parameters &params, UuidGenerator &generator) const;
+			void			   run(const boost::uuids::uuid &sessionId, Call &call) const;
 
-		[[nodiscard]] std::string print() const;
-};
+		private:
 
-
-
-class Inference
-{
-	public:
-
-		explicit Inference(const InferenceParameters &params);
-		~Inference();
-
-		static llama_model		 *loadModel(const InferenceParameters &params);
-		static const llama_vocab *loadVocabulary(llama_model *model);
-		static llama_context *
-		startContext(const InferenceParameters &params, llama_model *model);
-		static llama_sampler *initSampler(
-			const InferenceParameters &params,
-			llama_context			  *ctx,
-			llama_model				  *model
-		);
-
-		Output run(Input &inp);
-		void   clearMemory() const;
-
-	private:
-
-		llama_model		  *model_	= nullptr;
-		const llama_vocab *vocab_	= nullptr;
-		llama_context	  *ctx_		= nullptr;
-		llama_sampler	  *sampler_ = nullptr;
-
-		InferenceParameters		 parameters_;
-		std::vector<llama_token> tokens_;
-		const size_t			 promptInsertIdx_;
-
-		[[nodiscard]] std::string preparePrompt(const Input &inp) const;
-		void					  tokenize(const std::string &text);
-		void					  generate(const llama_batch &batch) const;
-		void					  prefill(llama_batch &batch, Input &inp) const;
-		[[nodiscard]] llama_token
-		sample(std::string *output, bool consolePrint) const;
-		[[nodiscard]] Output decode(llama_batch &batch, Input &inp) const;
-};
+			struct impl;
+			std::unique_ptr<impl> impl_;
+	};
+} // namespace Inference

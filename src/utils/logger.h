@@ -23,8 +23,7 @@ namespace Logger
 {
 	inline void init()
 	{
-		auto console_sink =
-			std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+		auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
 
 		// TODO: change it later
 		auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
